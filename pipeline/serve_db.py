@@ -27,7 +27,13 @@ def main() -> None:
     for table in TABLES:
         schema = table.split(".")[0]
         con.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
-        con.execute(f"CREATE TABLE {table} AS SELECT * FROM wh.{table}")
+        cols = [r[0] for r in con.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_catalog = 'wh' "
+            "AND table_schema = ? AND table_name = ?", table.split(".")).fetchall()]
+        # A ready-made label ("2025-26") so the AI never converts end-year season numbers itself.
+        label = (", CAST(season - 1 AS VARCHAR) || '-' || right(CAST(season AS VARCHAR), 2) AS season_label"
+                 if "season" in cols else "")
+        con.execute(f"CREATE TABLE {table} AS SELECT *{label} FROM wh.{table}")
     con.execute("DETACH wh")
     con.execute("CHECKPOINT")
     con.close()

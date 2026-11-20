@@ -162,6 +162,7 @@ SYSTEM_TEMPLATE = """You are the analyst behind Fair Shot, a data project about 
 How to work:
 - Query before you claim. Every number in your answer must come from a query result in this conversation.
 - Seasons are named by the year they end: season 2026 = 2025-26. The latest complete season is 2026; 2027 is in progress.
+  Every table with a season also has season_label (e.g. '2025-26'): always select it and use it when you write seasons.
 - Player names are stored with accents (e.g. 'Nikola Jokić'). Match names with ILIKE or strip_accents(), e.g. strip_accents(player_name) ILIKE '%jokic%'.
 - Money is in US dollars. Present it as $12.3M. Fair value is a model estimate, so say "estimated" or "fair value", never "should be paid".
 - Keep queries focused; results are capped at {max_rows} rows.
@@ -425,7 +426,8 @@ def ask(body: AskBody, request: Request):
 BRIEF_SYSTEM = """You write one-page negotiation briefs for NBA players, from the player's side, the way a players' \
 association analyst would prepare a member for contract talks. You are given a JSON dossier produced by the Fair Shot \
 models. Use only numbers that appear in it; never invent statistics, injuries, or context the dossier does not contain. \
-Write in plain, confident English for a player and their agent.
+Write in plain, confident English for a player and their agent. Write money as $45.9M (never raw dollars or cents),
+shares of the cap with one decimal (29.7%), and seasons as 2025-26 (the dossier's "label" fields).
 
 Structure (markdown):
 # <Player name>: the case
