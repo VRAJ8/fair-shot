@@ -97,7 +97,7 @@ that runs down as you scroll.
 - Jersey avatars in team colors instead of player photos (no image-rights issues).
 
 ### 5. AI agent (`agent/server.py`)
-- **Two interchangeable providers.** The live site runs **Google Gemini** (`gemini-3.8-flash`, free tier) through a
+- **Two interchangeable providers.** The live site runs **Google Gemini** (`gemini-3.6-flash`, falling back to 3.8 Flash and 3.5 Flash-Lite; free tier) through a
   manual function-calling loop with the `google-genai` SDK. **Anthropic Claude** (`claude-opus-5-5`, via the Anthropic
   SDK's tool runner) is a drop-in alternative: `AI_PROVIDER=claude`. Both use the same tool and sandbox.
 - **Ask the Ledger**: the model answers plain-English questions by writing SQL through a `run_sql` tool.

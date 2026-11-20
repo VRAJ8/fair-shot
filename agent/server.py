@@ -59,12 +59,12 @@ MODEL = "claude-opus-5-5"
 # the request on a fallback model chosen for the refusal category.
 FALLBACK = {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
 MAX_ROWS = 200
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")  # stable, on the Gemini free tier
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")  # stable, on the Gemini free tier
 # Free-tier capacity varies: when a model is overloaded (503) or rate limited
 # (429), fall back to the next stable free-tier model.
 GEMINI_FALLBACKS = [m.strip() for m in os.environ.get(
-    "GEMINI_FALLBACK_MODELS", "gemini-3.6-flash,gemini-3.5-flash-lite").split(",") if m.strip()]
-GEMINI_CALL_TIMEOUT_MS = 40_000   # per request
+    "GEMINI_FALLBACK_MODELS", "gemini-3.8-flash,gemini-3.5-flash-lite").split(",") if m.strip()]
+GEMINI_CALL_TIMEOUT_MS = 30_000   # per request
 ASK_DEADLINE_S = 120              # per question, across models and tool rounds
 OVERLOADED = {429, 500, 503, 504}
 NO_CREDENTIALS = "The agent has no Anthropic credentials. Set ANTHROPIC_API_KEY and restart it."
@@ -349,7 +349,8 @@ def ask_gemini(history: list[dict], question: str, queries: list[dict]) -> str:
                     name=call.name,
                     response=logged_sql(str((call.args or {}).get("query", "")), queries) if call.name == "run_sql"
                     else {"error": f"Unknown tool {call.name}"}) for call in calls]
-                contents.append(gtypes.Content(role="tool", parts=results))
+                # The Gemini API accepts only "user" and "model" roles; tool results go in a user turn.
+                contents.append(gtypes.Content(role="user", parts=results))
             return "I ran out of query steps before finishing. Try a narrower question."
         except Overloaded as exc:
             print(f"  gemini fallback: {exc}", flush=True)
