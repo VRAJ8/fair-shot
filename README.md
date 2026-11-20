@@ -108,7 +108,7 @@ that runs down as you scroll.
 ## Run it
 
 ```bash
-python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
+python3.12 -m venv .venv && .venv/bin/pip install -r requirements-pipeline.txt
 ```
 
 ```bash

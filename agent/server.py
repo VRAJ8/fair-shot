@@ -7,10 +7,15 @@ Endpoints
   POST /api/ask             -> {question, history?} -> answer + the SQL it ran
   POST /api/brief           -> {player_id} -> streamed markdown (text/event-stream)
 
-The agent answers questions by writing SQL against the DuckDB warehouse
+The agent answers questions by writing SQL against a slim copy of the
+warehouse (agent/fairshot.duckdb, built by `python -m pipeline.serve_db`)
 through a read-only, sandboxed tool: the connection is opened read-only with
 external file access disabled and the configuration locked, only a single
 SELECT/WITH statement is accepted, and results are capped.
+
+Because the deployed endpoints spend real API credits, each visitor is rate
+limited, inputs are capped, and AGENT_ENABLED=false pauses the AI entirely.
+Also set a monthly spend limit in the Anthropic Console.
 """
 from __future__ import annotations
 
@@ -18,17 +23,20 @@ import json
 import os
 import re
 import threading
+import time
+from collections import defaultdict, deque
 from pathlib import Path
 
 import anthropic
 import duckdb
 from anthropic import beta_tool
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 ROOT = Path(__file__).resolve().parent.parent
-WAREHOUSE = ROOT / "data" / "warehouse.duckdb"
+SLIM_DB = ROOT / "agent" / "fairshot.duckdb"
+DB_PATH = Path(os.environ.get("FAIRSHOT_DB") or (SLIM_DB if SLIM_DB.exists() else ROOT / "data" / "warehouse.duckdb"))
 PLAYERS = ROOT / "web" / "public" / "data" / "players"
 MODEL = "claude-opus-5-5"
 # Opt into server-side refusal fallbacks: on a policy decline the API re-runs
@@ -36,6 +44,60 @@ MODEL = "claude-opus-5-5"
 FALLBACK = {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
 MAX_ROWS = 200
 NO_CREDENTIALS = "The agent has no Anthropic credentials. Set ANTHROPIC_API_KEY and restart it."
+MAX_QUESTION_CHARS = 600
+
+
+def agent_enabled() -> bool:
+    return os.environ.get("AGENT_ENABLED", "true").lower() not in ("0", "false", "no", "off")
+
+
+class RateLimiter:
+    """Sliding-window limits per visitor, plus a ceiling for this server instance.
+
+    State lives in memory, so on a serverless host each warm instance keeps
+    its own counts. That bounds abuse; the hard cost guarantee is the monthly
+    spend limit set in the Anthropic Console.
+    """
+
+    def __init__(self, per_visitor: int, window_s: int, per_instance_hour: int):
+        self.per_visitor, self.window_s, self.per_instance_hour = per_visitor, window_s, per_instance_hour
+        self.hits: dict[str, deque] = defaultdict(deque)
+        self.instance: deque = deque()
+        self.lock = threading.Lock()
+
+    def check(self, key: str) -> None:
+        now = time.time()
+        with self.lock:
+            q = self.hits[key]
+            while q and now - q[0] > self.window_s:
+                q.popleft()
+            while self.instance and now - self.instance[0] > 3600:
+                self.instance.popleft()
+            if len(q) >= self.per_visitor:
+                wait = int(self.window_s - (now - q[0])) + 1
+                raise HTTPException(429, f"You've hit the demo limit. Try again in about {max(1, wait // 60)} min.")
+            if len(self.instance) >= self.per_instance_hour:
+                raise HTTPException(429, "The AI analyst is busy right now. Please try again later.")
+            q.append(now)
+            self.instance.append(now)
+
+
+ASK_LIMIT = RateLimiter(per_visitor=int(os.environ.get("ASK_LIMIT", "10")), window_s=600,
+                        per_instance_hour=int(os.environ.get("INSTANCE_LIMIT", "120")))
+BRIEF_LIMIT = RateLimiter(per_visitor=int(os.environ.get("BRIEF_LIMIT", "4")), window_s=600,
+                          per_instance_hour=int(os.environ.get("INSTANCE_LIMIT", "120")))
+
+
+def visitor(request: Request) -> str:
+    fwd = request.headers.get("x-forwarded-for", "")
+    return (fwd.split(",")[0].strip() or request.headers.get("x-real-ip")
+            or (request.client.host if request.client else "unknown"))
+
+
+def guard(request: Request, limiter: RateLimiter) -> None:
+    if not agent_enabled():
+        raise HTTPException(503, "The AI analyst is paused right now. Everything else on the site works.")
+    limiter.check(visitor(request))
 
 # Tables the agent may read, documented once (stable text -> cacheable prompt).
 TABLE_NOTES = {
@@ -92,8 +154,10 @@ _local = threading.local()
 def sandboxed_connection() -> duckdb.DuckDBPyConnection:
     con = getattr(_local, "con", None)
     if con is None:
-        con = duckdb.connect(str(WAREHOUSE), read_only=True,
-                             config={"enable_external_access": False, "lock_configuration": True})
+        # home_directory: serverless hosts have a read-only home; /tmp is writable.
+        con = duckdb.connect(str(DB_PATH), read_only=True,
+                             config={"home_directory": "/tmp", "enable_external_access": False,
+                                     "lock_configuration": True})
         _local.con = con
     return con
 
@@ -148,7 +212,8 @@ def system_prompt() -> str:
 def health():
     configured = bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")
                       or os.environ.get("ANTHROPIC_PROFILE") or (Path.home() / ".config" / "anthropic").exists())
-    return {"ok": True, "model": MODEL, "configured": configured, "warehouse": WAREHOUSE.exists()}
+    return {"ok": True, "model": MODEL, "configured": configured, "enabled": agent_enabled(),
+            "warehouse": DB_PATH.exists()}
 
 
 class AskBody(BaseModel):
@@ -157,9 +222,12 @@ class AskBody(BaseModel):
 
 
 @app.post("/api/ask")
-def ask(body: AskBody):
+def ask(body: AskBody, request: Request):
     if not body.question.strip():
         raise HTTPException(400, "Empty question")
+    if len(body.question) > MAX_QUESTION_CHARS:
+        raise HTTPException(400, f"Please keep questions under {MAX_QUESTION_CHARS} characters.")
+    guard(request, ASK_LIMIT)
     queries: list[dict] = []
 
     @beta_tool
@@ -178,12 +246,15 @@ def ask(body: AskBody):
         return json.dumps(result)
 
     # Prior turns are text only; the SQL behind them is not replayed.
-    history = [{"role": h["role"], "content": str(h["content"])} for h in body.history[-8:]
+    history = [{"role": h["role"], "content": str(h["content"])[:2000]} for h in body.history[-6:]
                if h.get("role") in ("user", "assistant") and h.get("content")]
-    messages = history + [{"role": "user", "content": body.question.strip()[:2000]}]
+    # The API requires the first message to be from the user.
+    while history and history[0]["role"] != "user":
+        history.pop(0)
+    messages = history + [{"role": "user", "content": body.question.strip()}]
     try:
         runner = client().beta.messages.tool_runner(
-            model=MODEL, max_tokens=16000, max_iterations=8,
+            model=MODEL, max_tokens=16000, max_iterations=6,
             system=[{"type": "text", "text": system_prompt(), "cache_control": {"type": "ephemeral"}}],
             output_config={"effort": "medium"},
             tools=[run_sql], messages=messages, **FALLBACK,
@@ -238,12 +309,13 @@ class BriefBody(BaseModel):
 
 
 @app.post("/api/brief")
-def brief(body: BriefBody):
+def brief(body: BriefBody, request: Request):
     if not re.fullmatch(r"[a-z0-9]{3,12}", body.player_id):
         raise HTTPException(400, "Bad player id")
     path = PLAYERS / f"{body.player_id}.json"
     if not path.exists():
         raise HTTPException(404, "Unknown player")
+    guard(request, BRIEF_LIMIT)
     doc = json.loads(path.read_text())
     # The dossier: drop the game-by-game log, keep the season summaries.
     doc["seasons"] = doc["seasons"][-6:]

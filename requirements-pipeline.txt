@@ -1,0 +1,13 @@
+# Everything the data pipeline needs (ingest -> warehouse -> models -> export),
+# plus the agent's runtime dependencies and a local server for it.
+-r requirements.txt
+beautifulsoup4==4.15.0
+lifelines==0.30.3
+lxml==6.1.3
+numpy==2.5.5
+pandas==2.3.3
+RapidFuzz==3.14.6
+requests==2.34.2
+scikit-learn==1.9.1
+scipy==1.18.1
+uvicorn==0.54.0

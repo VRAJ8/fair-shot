@@ -15,16 +15,25 @@ const SUGGESTIONS = [
 ]
 
 export function useAgentHealth() {
-  const [state, setState] = useState<'checking' | 'ready' | 'nokey' | 'offline'>('checking')
+  const [state, setState] = useState<'checking' | 'ready' | 'nokey' | 'offline' | 'paused'>('checking')
   useEffect(() => {
     fetch('/api/health').then((r) => r.ok ? r.json() : Promise.reject())
-      .then((d) => setState(d.configured ? 'ready' : 'nokey')).catch(() => setState('offline'))
+      .then((d) => setState(d.enabled === false ? 'paused' : d.configured ? 'ready' : 'nokey'))
+      .catch(() => setState('offline'))
   }, [])
   return state
 }
 
+const isLocal = typeof window !== 'undefined' && ['localhost', '127.0.0.1'].includes(window.location.hostname)
+
 function OfflineNote({ state }: { state: string }) {
   if (state === 'ready' || state === 'checking') return null
+  if (!isLocal || state === 'paused') return (
+    <div className="card" style={{ borderColor: 'var(--line-2)', fontSize: 14, marginBottom: 14 }}>
+      <b>The AI analyst is offline right now.</b>{' '}
+      <span className="dim">Every chart, player page and model on the site still works. The AI runs live in local demos.</span>
+    </div>
+  )
   return (
     <div className="card" style={{ borderColor: 'var(--line-2)', fontSize: 14, marginBottom: 14 }}>
       <b>{state === 'offline' ? 'The AI agent is not running.' : 'The AI agent has no API key.'}</b>{' '}

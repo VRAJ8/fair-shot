@@ -20,6 +20,7 @@ STEPS = [
     ("Career survival", "pipeline.models.survival"),
     ("Data-quality checks", "pipeline.validate"),
     ("Export JSON for the site", "pipeline.export"),
+    ("Slim database for the AI agent", "pipeline.serve_db"),
 ]
 
 
