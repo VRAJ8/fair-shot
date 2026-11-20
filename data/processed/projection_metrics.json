@@ -1,0 +1,101 @@
+{
+  "metrics": {
+    "h1": {
+      "n_train": 4147,
+      "n_test": 1774,
+      "mae_model": 1.337,
+      "mae_last_season": 1.598,
+      "mae_marcel": 1.442,
+      "r2_model": 0.652,
+      "r2_marcel": 0.624,
+      "interval_coverage_80": 0.799,
+      "conformal_margin_war": 0.336
+    },
+    "h2": {
+      "n_train": 3711,
+      "n_test": 1753,
+      "mae_model": 1.35,
+      "mae_last_season": 1.795,
+      "mae_marcel": 1.518,
+      "r2_model": 0.579,
+      "r2_marcel": 0.558,
+      "interval_coverage_80": 0.819,
+      "conformal_margin_war": 0.351
+    },
+    "h3": {
+      "n_train": 3294,
+      "n_test": 1734,
+      "mae_model": 1.358,
+      "mae_last_season": 1.935,
+      "mae_marcel": 1.552,
+      "r2_model": 0.512,
+      "r2_marcel": 0.504,
+      "interval_coverage_80": 0.821,
+      "conformal_margin_war": 0.304
+    }
+  },
+  "features": [
+    "age",
+    "war82",
+    "war82_l1",
+    "war82_l2",
+    "bpm",
+    "bpm_l1",
+    "bpm_l2",
+    "obpm",
+    "dbpm",
+    "mpg",
+    "mpg_l1",
+    "games_share",
+    "games_share_l1",
+    "usg_pct",
+    "ts_pct",
+    "ast_pct",
+    "trb_pct",
+    "fg3a_rate",
+    "experience",
+    "seasons_seen"
+  ],
+  "top_features": [
+    {
+      "feature": "war82",
+      "importance": 0.7991
+    },
+    {
+      "feature": "age",
+      "importance": 0.0769
+    },
+    {
+      "feature": "mpg",
+      "importance": 0.0486
+    },
+    {
+      "feature": "bpm",
+      "importance": 0.0481
+    },
+    {
+      "feature": "war82_l1",
+      "importance": 0.044
+    },
+    {
+      "feature": "bpm_l1",
+      "importance": 0.0243
+    },
+    {
+      "feature": "usg_pct",
+      "importance": 0.0087
+    },
+    {
+      "feature": "war82_l2",
+      "importance": 0.0082
+    },
+    {
+      "feature": "obpm",
+      "importance": 0.0074
+    },
+    {
+      "feature": "trb_pct",
+      "importance": 0.0064
+    }
+  ]
+}
