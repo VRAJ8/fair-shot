@@ -35,7 +35,7 @@ export default function App() {
           <div className="display" style={{ fontSize: 34, color: 'var(--text)' }}>Fair Shot</div>
           <p style={{ maxWidth: 680 }}>
             A player-side look at NBA pay: what production is worth, who gets paid for it, and what the schedule and the
-            CBA's rules take out of it. Built with Python, SQL (DuckDB), scikit-learn, React, D3, GSAP, Three.js and Claude.
+            CBA's rules take out of it. Built with Python, SQL (DuckDB), scikit-learn, React, D3, GSAP, Three.js, and an LLM agent (Gemini or Claude).
           </p>
           <p className="muted" style={{ fontSize: 12.5 }}>Data: Basketball-Reference.com and ESPN. Independent project, not affiliated with the NBA or NBPA.</p>
         </div>

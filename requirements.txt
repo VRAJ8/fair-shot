@@ -1,6 +1,7 @@
-# Runtime for the AI agent (also what Vercel installs for api/index.py).
+# Runtime for the AI agent: Gemini (default, free tier) or Claude. Vercel installs this for api/index.py.
 # The data pipeline needs more: pip install -r requirements-pipeline.txt
 anthropic==2.11.0
 duckdb==2.0.0
 fastapi==0.165.0
 pydantic==2.14.4
+google-genai==3.6.1

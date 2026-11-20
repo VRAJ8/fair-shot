@@ -14,7 +14,7 @@ const STAGES = [
   { t: 'ID crosswalk', d: 'Fuzzy name + team + games matching joins ESPN to BBRef' },
   { t: 'Models', d: 'Fair value · 3-yr projection · comps · DiD · survival' },
   { t: 'Tests', d: 'Uniqueness, ranges, cross-source reconciliation' },
-  { t: 'Site + agent', d: 'JSON export → React/D3/GSAP/Three.js; Claude agent on the warehouse' },
+  { t: 'Site + agent', d: 'JSON export → React/D3/GSAP/Three.js; LLM agent (Gemini or Claude) on the warehouse' },
 ]
 
 export default function Methods() {

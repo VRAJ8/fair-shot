@@ -1,6 +1,12 @@
 """Fair Shot AI: a data analyst agent over the warehouse, plus a negotiation-brief writer.
 
-    ANTHROPIC_API_KEY=... python -m agent.server        # serves http://127.0.0.1:8787
+    GEMINI_API_KEY=... python -m agent.server        # free tier (default provider)
+    AI_PROVIDER=claude ANTHROPIC_API_KEY=... python -m agent.server
+                                                     # serves http://127.0.0.1:8787
+
+Two interchangeable providers run the same tool loop: Google Gemini (free tier,
+used on the live site) and Anthropic Claude. AI_PROVIDER picks one; otherwise
+Gemini is used unless only an Anthropic key is configured.
 
 Endpoints
   GET  /api/health          -> is the agent configured?
@@ -30,6 +36,9 @@ from pathlib import Path
 import anthropic
 import duckdb
 from anthropic import beta_tool
+from google import genai
+from google.genai import errors as genai_errors
+from google.genai import types as gtypes
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -43,7 +52,24 @@ MODEL = "claude-opus-5-5"
 # the request on a fallback model chosen for the refusal category.
 FALLBACK = {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
 MAX_ROWS = 200
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")  # stable, on the Gemini free tier
 NO_CREDENTIALS = "The agent has no Anthropic credentials. Set ANTHROPIC_API_KEY and restart it."
+NO_GEMINI_KEY = "The agent has no Gemini key. Set GEMINI_API_KEY (free at Google AI Studio) and restart it."
+GEMINI_BUSY = "The free AI tier is at its limit right now. Please try again in a minute."
+
+
+def gemini_key() -> str | None:
+    return os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+
+
+def provider() -> str:
+    chosen = os.environ.get("AI_PROVIDER", "").lower()
+    if chosen in ("gemini", "claude"):
+        return chosen
+    if os.environ.get("ANTHROPIC_API_KEY") and not gemini_key():
+        return "claude"
+    return "gemini"
+
 MAX_QUESTION_CHARS = 600
 
 
@@ -191,7 +217,15 @@ def _json_safe(v):
 
 app = FastAPI(title="Fair Shot AI")
 _client: anthropic.Anthropic | None = None
+_gemini: genai.Client | None = None
 _system: str | None = None
+
+
+def gemini_client() -> genai.Client:
+    global _gemini
+    if _gemini is None:
+        _gemini = genai.Client(api_key=gemini_key())
+    return _gemini
 
 
 def client() -> anthropic.Anthropic:
@@ -210,10 +244,71 @@ def system_prompt() -> str:
 
 @app.get("/api/health")
 def health():
-    configured = bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")
-                      or os.environ.get("ANTHROPIC_PROFILE") or (Path.home() / ".config" / "anthropic").exists())
-    return {"ok": True, "model": MODEL, "configured": configured, "enabled": agent_enabled(),
-            "warehouse": DB_PATH.exists()}
+    if provider() == "gemini":
+        configured, model = bool(gemini_key()), GEMINI_MODEL
+    else:
+        configured = bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+                          or os.environ.get("ANTHROPIC_PROFILE") or (Path.home() / ".config" / "anthropic").exists())
+        model = MODEL
+    return {"ok": True, "provider": provider(), "model": model, "configured": configured,
+            "enabled": agent_enabled(), "warehouse": DB_PATH.exists()}
+
+
+def logged_sql(query: str, queries: list[dict]) -> dict:
+    """Run a query for either provider and record it for the "how I got this" panel."""
+    try:
+        result = execute_readonly(query)
+    except Exception as exc:  # returned to the model so it can fix the query
+        queries.append({"sql": query, "error": str(exc)})
+        return {"error": str(exc)}
+    queries.append({"sql": query, **result})
+    return result
+
+
+SQL_TOOL = gtypes.Tool(function_declarations=[gtypes.FunctionDeclaration(
+    name="run_sql",
+    description="Run one read-only DuckDB SELECT query against the Fair Shot warehouse and return the rows as JSON.",
+    parameters_json_schema={
+        "type": "object",
+        "properties": {"query": {"type": "string", "description":
+                                 "A single SELECT or WITH statement. Schema-qualify tables, e.g. model.fair_value."}},
+        "required": ["query"],
+    },
+)])
+MAX_TOOL_ROUNDS = 6
+
+
+def ask_gemini(history: list[dict], question: str, queries: list[dict]) -> str:
+    """Manual tool loop: the model asks for SQL, we run it in the sandbox, repeat."""
+    if not gemini_key():
+        raise HTTPException(401, NO_GEMINI_KEY)
+    contents = [gtypes.Content(role="user" if h["role"] == "user" else "model",
+                               parts=[gtypes.Part.from_text(text=h["content"])]) for h in history]
+    contents.append(gtypes.Content(role="user", parts=[gtypes.Part.from_text(text=question)]))
+    config = gtypes.GenerateContentConfig(
+        system_instruction=system_prompt(), tools=[SQL_TOOL], max_output_tokens=8192,
+        automatic_function_calling=gtypes.AutomaticFunctionCallingConfig(disable=True),
+    )
+    try:
+        for _ in range(MAX_TOOL_ROUNDS):
+            response = gemini_client().models.generate_content(model=GEMINI_MODEL, contents=contents, config=config)
+            calls = response.function_calls or []
+            if not calls:
+                return (response.text or "").strip()
+            # Keep the model's turn verbatim (it carries the call and any thought signatures).
+            contents.append(response.candidates[0].content)
+            results = [gtypes.Part.from_function_response(
+                name=call.name,
+                response=logged_sql(str((call.args or {}).get("query", "")), queries) if call.name == "run_sql"
+                else {"error": f"Unknown tool {call.name}"}) for call in calls]
+            contents.append(gtypes.Content(role="tool", parts=results))
+    except genai_errors.APIError as exc:
+        if exc.code == 429:
+            raise HTTPException(429, GEMINI_BUSY)
+        if "api key" in str(exc.message or "").lower():
+            raise HTTPException(401, NO_GEMINI_KEY)
+        raise HTTPException(502, f"Gemini API error {exc.code}: {exc.message}")
+    return "I ran out of query steps before finishing. Try a narrower question."
 
 
 class AskBody(BaseModel):
@@ -237,13 +332,7 @@ def ask(body: AskBody, request: Request):
         Args:
             query: A single SELECT or WITH statement. Schema-qualify tables, e.g. model.fair_value.
         """
-        try:
-            result = execute_readonly(query)
-        except Exception as exc:  # returned to the model so it can fix the query
-            queries.append({"sql": query, "error": str(exc)})
-            return json.dumps({"error": str(exc)})
-        queries.append({"sql": query, **result})
-        return json.dumps(result)
+        return json.dumps(logged_sql(query, queries))
 
     # Prior turns are text only; the SQL behind them is not replayed.
     history = [{"role": h["role"], "content": str(h["content"])[:2000]} for h in body.history[-6:]
@@ -251,6 +340,9 @@ def ask(body: AskBody, request: Request):
     # The API requires the first message to be from the user.
     while history and history[0]["role"] != "user":
         history.pop(0)
+    if provider() == "gemini":
+        answer = ask_gemini(history, body.question.strip(), queries)
+        return {"answer": answer or "(no answer)", "queries": queries[-4:]}
     messages = history + [{"role": "user", "content": body.question.strip()}]
     try:
         runner = client().beta.messages.tool_runner(
@@ -321,12 +413,32 @@ def brief(body: BriefBody, request: Request):
     doc["seasons"] = doc["seasons"][-6:]
     doc["availability"] = {s: {k: v for k, v in a.items() if k != "games"} for s, a in doc.get("availability", {}).items()}
     dossier = json.dumps(doc, ensure_ascii=False)
+    prompt = f"Dossier:\n{dossier}\n\nWrite the brief."
+
+    def gemini_events():
+        if not gemini_key():
+            yield f"data: {json.dumps({'error': NO_GEMINI_KEY})}\n\n"
+        else:
+            try:
+                for chunk in gemini_client().models.generate_content_stream(
+                    model=GEMINI_MODEL, contents=prompt,
+                    config=gtypes.GenerateContentConfig(system_instruction=BRIEF_SYSTEM, max_output_tokens=4096),
+                ):
+                    if chunk.text:
+                        yield f"data: {json.dumps({'text': chunk.text})}\n\n"
+            except genai_errors.APIError as exc:
+                msg = GEMINI_BUSY if exc.code == 429 else f"Gemini API error {exc.code}: {exc.message}"
+                yield f"data: {json.dumps({'error': msg})}\n\n"
+        yield "data: [DONE]\n\n"
+
+    if provider() == "gemini":
+        return StreamingResponse(gemini_events(), media_type="text/event-stream")
 
     def events():
         try:
             with client().beta.messages.stream(
                 model=MODEL, max_tokens=8000, system=BRIEF_SYSTEM, output_config={"effort": "medium"},
-                messages=[{"role": "user", "content": f"Dossier:\n{dossier}\n\nWrite the brief."}], **FALLBACK,
+                messages=[{"role": "user", "content": prompt}], **FALLBACK,
             ) as stream:
                 for text in stream.text_stream:
                     yield f"data: {json.dumps({'text': text})}\n\n"

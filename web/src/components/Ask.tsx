@@ -14,14 +14,25 @@ const SUGGESTIONS = [
   'Compare Shai Gilgeous-Alexander and Nikola Jokić: value, pay and projection.',
 ]
 
+// One health check per page load, shared by every AI panel.
+let healthPromise: Promise<any> | null = null
+const getHealth = () => (healthPromise ??= fetch('/api/health').then((r) => (r.ok ? r.json() : Promise.reject())))
+const PROVIDER_LABEL: Record<string, string> = { gemini: 'Gemini', claude: 'Claude' }
+
 export function useAgentHealth() {
   const [state, setState] = useState<'checking' | 'ready' | 'nokey' | 'offline' | 'paused'>('checking')
   useEffect(() => {
-    fetch('/api/health').then((r) => r.ok ? r.json() : Promise.reject())
-      .then((d) => setState(d.enabled === false ? 'paused' : d.configured ? 'ready' : 'nokey'))
+    getHealth().then((d) => setState(d.enabled === false ? 'paused' : d.configured ? 'ready' : 'nokey'))
       .catch(() => setState('offline'))
   }, [])
   return state
+}
+
+/** "Gemini" or "Claude": whichever model the agent server is running. */
+export function useAgentProvider() {
+  const [name, setName] = useState('AI')
+  useEffect(() => { getHealth().then((d) => setName(PROVIDER_LABEL[d.provider] ?? 'AI')).catch(() => {}) }, [])
+  return name
 }
 
 const isLocal = typeof window !== 'undefined' && ['localhost', '127.0.0.1'].includes(window.location.hostname)
@@ -38,7 +49,7 @@ function OfflineNote({ state }: { state: string }) {
     <div className="card" style={{ borderColor: 'var(--line-2)', fontSize: 14, marginBottom: 14 }}>
       <b>{state === 'offline' ? 'The AI agent is not running.' : 'The AI agent has no API key.'}</b>{' '}
       <span className="dim">Start it from the project root with</span>{' '}
-      <code className="mono" style={{ fontSize: 12.5 }}>ANTHROPIC_API_KEY=… .venv/bin/python -m agent.server</code>
+      <code className="mono" style={{ fontSize: 12.5 }}>GEMINI_API_KEY=… .venv/bin/python -m agent.server</code>
       <span className="dim">, then reload. Everything else on the site works without it.</span>
     </div>
   )
@@ -107,6 +118,7 @@ export function AskPanel({ compact = false }: { compact?: boolean }) {
 
 export function BriefButton({ playerId, name }: { playerId: string; name: string }) {
   const health = useAgentHealth()
+  const model = useAgentProvider()
   const [text, setText] = useState('')
   const [state, setState] = useState<'idle' | 'streaming' | 'done' | 'error'>('idle')
   async function run() {
@@ -140,9 +152,9 @@ export function BriefButton({ playerId, name }: { playerId: string; name: string
     <div className="card" style={{ background: 'linear-gradient(135deg, #1a1410, var(--card))', borderColor: '#3a2a1c' }}>
       <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'space-between' }}>
         <div>
-          <div className="kicker" style={{ color: 'var(--orange)' }}>AI · Claude</div>
+          <div className="kicker" style={{ color: 'var(--orange)' }}>AI · {model}</div>
           <h3 className="section-title" style={{ fontSize: 30, margin: '4px 0' }}>Make the case for {name}</h3>
-          <div className="dim" style={{ fontSize: 14 }}>A one-page negotiation brief from the player's side, written by Claude from this page's numbers only.</div>
+          <div className="dim" style={{ fontSize: 14 }}>A one-page negotiation brief from the player's side, written by {model} from this page's numbers only.</div>
         </div>
         <button className="btn" onClick={run} disabled={state === 'streaming' || health !== 'ready'}>
           {state === 'streaming' ? 'Writing…' : state === 'done' ? 'Write it again' : 'Write the brief'}

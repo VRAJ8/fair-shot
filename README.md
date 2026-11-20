@@ -7,7 +7,7 @@
 Fair Shot is an end-to-end analytics project that looks at NBA pay from the **players' side**, the way a
 players' association would. It collects 16 seasons of data from two independent sources, reconciles them in a
 tested SQL warehouse, prices every player's production with a wins-based market model, projects the next three
-seasons, and tells the story as a scroll-driven, interactive site. An AI analyst (Claude) answers questions by
+seasons, and tells the story as a scroll-driven, interactive site. An AI analyst (Gemini on the free tier, or Claude) answers questions by
 writing SQL against the same warehouse, and drafts negotiation briefs for any player.
 
 > Seasons are named by the year they end in the code (2026 = 2025–26). The latest complete season is 2025–26;
@@ -39,7 +39,7 @@ Sources ──► raw cache ──► DuckDB raw ──► staging SQL ──►
    │                               65-game DiD · survival · payroll tiers │
    │                                                                      ▼
    │                         data-quality tests (14 checks) ──► JSON export ──► React site
-   └──────────────────────────────────────────────────────────────────────► Claude agent (SQL tool)
+   └──────────────────────────────────────────────────────────────────────► LLM agent (SQL tool)
 ```
 
 ### 1. Data engineering (`pipeline/`)
@@ -97,13 +97,16 @@ that runs down as you scroll.
 - Jersey avatars in team colors instead of player photos (no image-rights issues).
 
 ### 5. AI agent (`agent/server.py`)
-- **Ask the Ledger**: Claude (`claude-opus-5-5`) answers plain-English questions by writing SQL through a
-  `run_sql` tool, using the Anthropic SDK's tool runner. The tool is sandboxed: a read-only DuckDB connection,
+- **Two interchangeable providers.** The live site runs **Google Gemini** (`gemini-3.8-flash`, free tier) through a
+  manual function-calling loop with the `google-genai` SDK. **Anthropic Claude** (`claude-opus-5-5`, via the Anthropic
+  SDK's tool runner) is a drop-in alternative: `AI_PROVIDER=claude`. Both use the same tool and sandbox.
+- **Ask the Ledger**: the model answers plain-English questions by writing SQL through a `run_sql` tool.
+  The tool is sandboxed: a read-only DuckDB connection,
   external file access disabled, configuration locked, a single SELECT/WITH statement per call, and capped rows.
   Every answer shows the SQL it ran.
 - **Make the case**: streams a one-page negotiation brief from the player's side, grounded only in that
   player's exported numbers.
-- The schema documentation lives in a cached system prompt. Server-side refusal fallbacks are enabled.
+- The schema documentation is generated from the database into the system prompt. On Claude, the prompt is cached and server-side refusal fallbacks are enabled.
 
 ---
 
@@ -121,10 +124,11 @@ python3.12 -m venv .venv && .venv/bin/pip install -r requirements-pipeline.txt
 npm --prefix web install && npm --prefix web run dev   # http://localhost:5173
 ```
 
-Optional, the AI analyst (needs an Anthropic API key):
+Optional, the AI analyst. It needs a free Gemini key from Google AI Studio (or `AI_PROVIDER=claude` with an
+`ANTHROPIC_API_KEY`):
 
 ```bash
-ANTHROPIC_API_KEY=sk-ant-... .venv/bin/python -m agent.server   # http://127.0.0.1:8787, proxied at /api
+GEMINI_API_KEY=... .venv/bin/python -m agent.server   # http://127.0.0.1:8787, proxied at /api
 ```
 
 `npm --prefix web run build` produces a static site in `web/dist`. The site runs fully without the agent.
@@ -134,15 +138,18 @@ ANTHROPIC_API_KEY=sk-ant-... .venv/bin/python -m agent.server   # http://127.0.0
 Python function at `/api/*` (`api/index.py`) that queries the slim read-only database `agent/fairshot.duckdb`,
 which `pipeline.run` rebuilds. Pushes to `main` deploy automatically.
 
-To turn the AI analyst on, add your key as an environment variable, then redeploy:
+To turn the AI analyst on, add a free Gemini key (Google AI Studio, no card) as an environment variable, then
+redeploy:
 
 ```bash
-vercel env add ANTHROPIC_API_KEY production
+vercel env add GEMINI_API_KEY production
 ```
 
-Because the endpoints spend real API credits, each visitor is rate limited (10 questions and 4 briefs per 10
-minutes, plus an hourly cap per instance), questions are capped at 600 characters, and `AGENT_ENABLED=false` pauses
-the AI without a code change. Also set a monthly spend limit in the Anthropic Console: that is the hard guarantee.
+The free tier can't produce a bill; if traffic exceeds its limits, the AI replies "busy, try again" until the limit
+resets. Each visitor is also rate limited (10 questions and 4 briefs per 10 minutes, plus an hourly cap per instance),
+questions are capped at 600 characters, and `AGENT_ENABLED=false` pauses the AI without a code change. Google may use
+free-tier prompts to improve its models; everything the agent sees is public NBA data. To run Claude instead, set
+`AI_PROVIDER=claude` and `ANTHROPIC_API_KEY`, plus a monthly spend limit in the Anthropic Console.
 
 ## Project layout
 
@@ -159,7 +166,7 @@ pipeline/
   validate.py       data-quality checks + reconciliation report
   export.py         JSON for the site
   run.py            the whole pipeline
-agent/server.py     FastAPI + Claude tool runner
+agent/server.py     FastAPI agent: Gemini (default) or Claude, sandboxed SQL tool
 web/                React + D3 + GSAP + Three.js site
 ```
 
