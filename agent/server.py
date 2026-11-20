@@ -39,6 +39,13 @@ from anthropic import beta_tool
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types as gtypes
+
+# google-genai's HTTP transport (httpx2 in current releases, httpx in older ones).
+try:
+    import httpx2 as _http
+except ImportError:  # pragma: no cover
+    import httpx as _http
+TRANSPORT_ERRORS = (_http.TimeoutException, _http.TransportError)
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -53,6 +60,13 @@ MODEL = "claude-opus-5-5"
 FALLBACK = {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
 MAX_ROWS = 200
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")  # stable, on the Gemini free tier
+# Free-tier capacity varies: when a model is overloaded (503) or rate limited
+# (429), fall back to the next stable free-tier model.
+GEMINI_FALLBACKS = [m.strip() for m in os.environ.get(
+    "GEMINI_FALLBACK_MODELS", "gemini-3.6-flash,gemini-3.5-flash-lite").split(",") if m.strip()]
+GEMINI_CALL_TIMEOUT_MS = 40_000   # per request
+ASK_DEADLINE_S = 120              # per question, across models and tool rounds
+OVERLOADED = {429, 500, 503, 504}
 NO_CREDENTIALS = "The agent has no Anthropic credentials. Set ANTHROPIC_API_KEY and restart it."
 NO_GEMINI_KEY = "The agent has no Gemini key. Set GEMINI_API_KEY (free at Google AI Studio) and restart it."
 GEMINI_BUSY = "The free AI tier is at its limit right now. Please try again in a minute."
@@ -224,8 +238,33 @@ _system: str | None = None
 def gemini_client() -> genai.Client:
     global _gemini
     if _gemini is None:
-        _gemini = genai.Client(api_key=gemini_key())
+        _gemini = genai.Client(api_key=gemini_key(), http_options=gtypes.HttpOptions(
+            timeout=GEMINI_CALL_TIMEOUT_MS,
+            retry_options=gtypes.HttpRetryOptions(attempts=2, initial_delay=1.0, max_delay=3.0,
+                                                  http_status_codes=sorted(OVERLOADED)),
+        ))
     return _gemini
+
+
+def gemini_models() -> list[str]:
+    return list(dict.fromkeys([GEMINI_MODEL, *GEMINI_FALLBACKS]))
+
+
+class Overloaded(Exception):
+    """This model is busy or slow right now; try the next one."""
+
+
+def call_gemini(fn, model: str):
+    try:
+        return fn(model)
+    except genai_errors.APIError as exc:
+        if exc.code in OVERLOADED:
+            raise Overloaded(f"{model}: {exc.code}") from exc
+        if "api key" in str(exc.message or "").lower():
+            raise HTTPException(401, NO_GEMINI_KEY)
+        raise HTTPException(502, f"Gemini API error {exc.code}: {exc.message}")
+    except TRANSPORT_ERRORS as exc:
+        raise Overloaded(f"{model}: {exc.__class__.__name__}") from exc
 
 
 def client() -> anthropic.Anthropic:
@@ -245,7 +284,7 @@ def system_prompt() -> str:
 @app.get("/api/health")
 def health():
     if provider() == "gemini":
-        configured, model = bool(gemini_key()), GEMINI_MODEL
+        configured, model = bool(gemini_key()), " → ".join(gemini_models())
     else:
         configured = bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")
                           or os.environ.get("ANTHROPIC_PROFILE") or (Path.home() / ".config" / "anthropic").exists())
@@ -279,36 +318,43 @@ MAX_TOOL_ROUNDS = 6
 
 
 def ask_gemini(history: list[dict], question: str, queries: list[dict]) -> str:
-    """Manual tool loop: the model asks for SQL, we run it in the sandbox, repeat."""
+    """Manual tool loop: the model asks for SQL, we run it in the sandbox, repeat.
+    If a model is overloaded, start the question over on the next free-tier model."""
     if not gemini_key():
         raise HTTPException(401, NO_GEMINI_KEY)
-    contents = [gtypes.Content(role="user" if h["role"] == "user" else "model",
-                               parts=[gtypes.Part.from_text(text=h["content"])]) for h in history]
-    contents.append(gtypes.Content(role="user", parts=[gtypes.Part.from_text(text=question)]))
+    deadline = time.time() + ASK_DEADLINE_S
     config = gtypes.GenerateContentConfig(
         system_instruction=system_prompt(), tools=[SQL_TOOL], max_output_tokens=8192,
         automatic_function_calling=gtypes.AutomaticFunctionCallingConfig(disable=True),
     )
-    try:
-        for _ in range(MAX_TOOL_ROUNDS):
-            response = gemini_client().models.generate_content(model=GEMINI_MODEL, contents=contents, config=config)
-            calls = response.function_calls or []
-            if not calls:
-                return (response.text or "").strip()
-            # Keep the model's turn verbatim (it carries the call and any thought signatures).
-            contents.append(response.candidates[0].content)
-            results = [gtypes.Part.from_function_response(
-                name=call.name,
-                response=logged_sql(str((call.args or {}).get("query", "")), queries) if call.name == "run_sql"
-                else {"error": f"Unknown tool {call.name}"}) for call in calls]
-            contents.append(gtypes.Content(role="tool", parts=results))
-    except genai_errors.APIError as exc:
-        if exc.code == 429:
-            raise HTTPException(429, GEMINI_BUSY)
-        if "api key" in str(exc.message or "").lower():
-            raise HTTPException(401, NO_GEMINI_KEY)
-        raise HTTPException(502, f"Gemini API error {exc.code}: {exc.message}")
-    return "I ran out of query steps before finishing. Try a narrower question."
+    for model in gemini_models():
+        if time.time() > deadline:
+            break
+        queries.clear()
+        contents = [gtypes.Content(role="user" if h["role"] == "user" else "model",
+                                   parts=[gtypes.Part.from_text(text=h["content"])]) for h in history]
+        contents.append(gtypes.Content(role="user", parts=[gtypes.Part.from_text(text=question)]))
+        try:
+            for _ in range(MAX_TOOL_ROUNDS):
+                if time.time() > deadline:
+                    raise Overloaded("deadline")
+                response = call_gemini(lambda m: gemini_client().models.generate_content(
+                    model=m, contents=contents, config=config), model)
+                calls = response.function_calls or []
+                if not calls:
+                    return (response.text or "").strip()
+                # Keep the model's turn verbatim (it carries the call and any thought signatures).
+                contents.append(response.candidates[0].content)
+                results = [gtypes.Part.from_function_response(
+                    name=call.name,
+                    response=logged_sql(str((call.args or {}).get("query", "")), queries) if call.name == "run_sql"
+                    else {"error": f"Unknown tool {call.name}"}) for call in calls]
+                contents.append(gtypes.Content(role="tool", parts=results))
+            return "I ran out of query steps before finishing. Try a narrower question."
+        except Overloaded as exc:
+            print(f"  gemini fallback: {exc}", flush=True)
+            continue
+    raise HTTPException(503, GEMINI_BUSY)
 
 
 class AskBody(BaseModel):
@@ -419,16 +465,27 @@ def brief(body: BriefBody, request: Request):
         if not gemini_key():
             yield f"data: {json.dumps({'error': NO_GEMINI_KEY})}\n\n"
         else:
-            try:
-                for chunk in gemini_client().models.generate_content_stream(
-                    model=GEMINI_MODEL, contents=prompt,
-                    config=gtypes.GenerateContentConfig(system_instruction=BRIEF_SYSTEM, max_output_tokens=4096),
-                ):
-                    if chunk.text:
-                        yield f"data: {json.dumps({'text': chunk.text})}\n\n"
-            except genai_errors.APIError as exc:
-                msg = GEMINI_BUSY if exc.code == 429 else f"Gemini API error {exc.code}: {exc.message}"
-                yield f"data: {json.dumps({'error': msg})}\n\n"
+            config = gtypes.GenerateContentConfig(system_instruction=BRIEF_SYSTEM, max_output_tokens=4096)
+            sent, error = False, GEMINI_BUSY
+            for model in gemini_models():
+                try:
+                    for chunk in gemini_client().models.generate_content_stream(
+                            model=model, contents=prompt, config=config):
+                        if chunk.text:
+                            sent = True
+                            yield f"data: {json.dumps({'text': chunk.text})}\n\n"
+                    break
+                except genai_errors.APIError as exc:
+                    if exc.code in OVERLOADED and not sent:
+                        continue  # nothing streamed yet: try the next model
+                    error = GEMINI_BUSY if exc.code in OVERLOADED else f"Gemini API error {exc.code}: {exc.message}"
+                except TRANSPORT_ERRORS:
+                    if not sent:
+                        continue
+                yield f"data: {json.dumps({'error': error})}\n\n"
+                break
+            else:
+                yield f"data: {json.dumps({'error': GEMINI_BUSY})}\n\n"
         yield "data: [DONE]\n\n"
 
     if provider() == "gemini":
