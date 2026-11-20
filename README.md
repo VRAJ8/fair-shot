@@ -2,6 +2,8 @@
 
 **What every NBA player produces, what they're paid, and who keeps the difference.**
 
+**Live: [fair-shot.vercel.app](https://fair-shot.vercel.app)**
+
 Fair Shot is an end-to-end analytics project that looks at NBA pay from the **players' side**, the way a
 players' association would. It collects 16 seasons of data from two independent sources, reconciles them in a
 tested SQL warehouse, prices every player's production with a wins-based market model, projects the next three
@@ -125,8 +127,22 @@ Optional, the AI analyst (needs an Anthropic API key):
 ANTHROPIC_API_KEY=sk-ant-... .venv/bin/python -m agent.server   # http://127.0.0.1:8787, proxied at /api
 ```
 
-`npm --prefix web run build` produces a static site in `web/dist` (with a `404.html` fallback for GitHub Pages).
-The site runs fully without the agent. The AI panels explain how to start it.
+`npm --prefix web run build` produces a static site in `web/dist`. The site runs fully without the agent.
+
+## Deploy (Vercel)
+`vercel.json` deploys the site and the agent together. The site is a static Vite build on the CDN; the agent is a
+Python function at `/api/*` (`api/index.py`) that queries the slim read-only database `agent/fairshot.duckdb`,
+which `pipeline.run` rebuilds. Pushes to `main` deploy automatically.
+
+To turn the AI analyst on, add your key as an environment variable, then redeploy:
+
+```bash
+vercel env add ANTHROPIC_API_KEY production
+```
+
+Because the endpoints spend real API credits, each visitor is rate limited (10 questions and 4 briefs per 10
+minutes, plus an hourly cap per instance), questions are capped at 600 characters, and `AGENT_ENABLED=false` pauses
+the AI without a code change. Also set a monthly spend limit in the Anthropic Console: that is the hard guarantee.
 
 ## Project layout
 
